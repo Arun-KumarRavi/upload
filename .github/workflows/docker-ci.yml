@@ -1,15 +1,18 @@
+# CI workflow for building and pushing Docker images
 name: CI / Docker Build & Push
+
 on:
   push:
-    branches: [ main ]          # <-- will be updated per user preference
+    branches: [ main ]
   pull_request:
     branches: [ main ]
 
 env:
-  REGISTRY: ghcr.io               # or Docker Hub (docker.io)
+  REGISTRY: ghcr.io
   IMAGE_NAME_FRONTEND: ${{ github.repository }}-frontend
-  IMAGE_NAME_BACKEND:  ${{ github.repository }}-backend
+  IMAGE_NAME_BACKEND: ${{ github.repository }}-backend
   NODE_VERSION: 18
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   setup:
