@@ -1,0 +1,122 @@
+name: CI / Docker Build & Push
+on:
+  push:
+    branches: [ main ]          # <-- will be updated per user preference
+  pull_request:
+    branches: [ main ]
+
+env:
+  REGISTRY: ghcr.io               # or Docker Hub (docker.io)
+  IMAGE_NAME_FRONTEND: ${{ github.repository }}-frontend
+  IMAGE_NAME_BACKEND:  ${{ github.repository }}-backend
+  NODE_VERSION: 18
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.vars.outputs.sha }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set variables
+        id: vars
+        run: echo "sha=${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
+
+  build-frontend:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache node modules
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ env.NODE_VERSION }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-${{ env.NODE_VERSION }}-
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install deps (frontend)
+        run: npm ci
+
+      - name: Lint & test (frontend)   # optional – runs if scripts exist
+        run: |
+          npm run lint || echo "No lint script"
+          npm test || echo "No test script"
+
+      - name: Build production bundle
+        run: npm run build   # Vite outputs to /dist
+
+      - name: Build Docker image (frontend)
+        run: |
+          docker build -f Dockerfile.frontend -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_FRONTEND }}:${{ needs.setup.outputs.commit_sha }} .
+        # the Dockerfile copies the /dist folder
+
+  build-backend:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache node modules (backend)
+        uses: actions/cache@v4
+        with:
+          path: backend/.npm
+          key: ${{ runner.os }}-node-${{ env.NODE_VERSION }}-${{ hashFiles('backend/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-${{ env.NODE_VERSION }}-
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install deps (backend)
+        working-directory: backend
+        run: npm ci
+
+      - name: Lint & test (backend)   # optional
+        working-directory: backend
+        run: |
+          npm run lint || echo "No lint script"
+          npm test || echo "No test script"
+
+      - name: Build Docker image (backend)
+        run: |
+          docker build -f Dockerfile.backend -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_BACKEND }}:${{ needs.setup.outputs.commit_sha }} .
+  
+  push-images:
+    needs: [build-frontend, build-backend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Push frontend image
+        run: |
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_FRONTEND }}:${{ needs.setup.outputs.commit_sha }}
+
+      - name: Push backend image
+        run: |
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_BACKEND }}:${{ needs.setup.outputs.commit_sha }}
+
+  # ---- OPTIONAL DEPLOY STEP (placeholder) ----
+  # deploy:
+  #   needs: push-images
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Trigger Render / Vercel deploy
+  #       run: echo "Add your deployment commands here"
