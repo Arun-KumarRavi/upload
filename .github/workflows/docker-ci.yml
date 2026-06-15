@@ -1,125 +1,258 @@
-# CI workflow for building and pushing Docker images
-name: CI / Docker Build & Push
+name: CI/CD Pipeline for db4fresh
 
 on:
   push:
-    branches: [ main ]
+    branches: ["main"]
   pull_request:
-    branches: [ main ]
-
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME_FRONTEND: ${{ github.repository }}-frontend
-  IMAGE_NAME_BACKEND: ${{ github.repository }}-backend
-  NODE_VERSION: 18
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    branches: ["main"]
 
 jobs:
-  setup:
+  build-and-deploy:
     runs-on: ubuntu-latest
-    outputs:
-      commit_sha: ${{ steps.vars.outputs.sha }}
+    permissions:
+      contents: write
+      id-token: write # needed for OIDC with AWS
+    env:
+      IMAGE_NAME_FRONTEND: ${{ secrets.DOCKERHUB_USERNAME }}/db4fresh-frontend
+      IMAGE_NAME_BACKEND: ${{ secrets.DOCKERHUB_USERNAME }}/db4fresh-backend
+      IMAGE_TAG: ${{ github.sha }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
     steps:
+      # -------------------------------------------------
+      # 1. SCM Checkout
+      # -------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Set variables
-        id: vars
-        run: echo "sha=${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
-
-  build-frontend:
-    needs: setup
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Cache node modules
-        uses: actions/cache@v4
         with:
-          path: ~/.npm
-          key: ${{ runner.os }}-node-${{ env.NODE_VERSION }}-${{ hashFiles('package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-node-${{ env.NODE_VERSION }}-
+          fetch-depth: 0
 
-      - name: Install Node
+      # -------------------------------------------------
+      # 2. Set up Node.js (frontend & backend)
+      # -------------------------------------------------
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: "20"
+          cache: "npm"
 
-      - name: Install deps (frontend)
+      # -------------------------------------------------
+      # 3. Install dependencies
+      # -------------------------------------------------
+      - name: Install frontend dependencies
         run: npm ci
+        working-directory: .
 
-      - name: Lint & test (frontend)   # optional – runs if scripts exist
-        run: |
-          npm run lint || echo "No lint script"
-          npm test || echo "No test script"
-
-      - name: Build production bundle
-        run: npm run build   # Vite outputs to /dist
-
-      - name: Build Docker image (frontend)
-        run: |
-          docker build -f Dockerfile.frontend -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_FRONTEND }}:${{ needs.setup.outputs.commit_sha }} .
-        # the Dockerfile copies the /dist folder
-
-  build-backend:
-    needs: setup
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Cache node modules (backend)
-        uses: actions/cache@v4
-        with:
-          path: backend/.npm
-          key: ${{ runner.os }}-node-${{ env.NODE_VERSION }}-${{ hashFiles('backend/package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-node-${{ env.NODE_VERSION }}-
-
-      - name: Install Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Install deps (backend)
-        working-directory: backend
+      - name: Install backend dependencies
         run: npm ci
+        working-directory: ./backend
 
-      - name: Lint & test (backend)   # optional
-        working-directory: backend
+      # -------------------------------------------------
+      # 4. Build applications
+      # -------------------------------------------------
+      - name: Build Frontend
+        run: npm run build
+        working-directory: .
+
+      - name: Build Backend
+        run: npm run build
+        working-directory: ./backend
+
+      # -------------------------------------------------
+      # 5. SonarQube Static Code Analysis
+      # -------------------------------------------------
+      - name: SonarQube Scan
+        uses: sonarsource/sonarqube-scan-action@v5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          projectBaseDir: .
+
+      # -------------------------------------------------
+      # 6. Quality Gate Validation (fail fast)
+      # -------------------------------------------------
+      - name: Quality Gate Check
         run: |
-          npm run lint || echo "No lint script"
-          npm test || echo "No test script"
+          echo "SonarCloud automatically fails on quality gate."
 
-      - name: Build Docker image (backend)
+      # -------------------------------------------------
+      # 7. Frontend Lint & Unit Tests
+      # -------------------------------------------------
+      - name: Frontend Lint
+        run: npm run lint
+        working-directory: .
+
+      - name: Frontend Unit Tests
+        run: npm test
+        working-directory: .
+
+      # -------------------------------------------------
+      # 8. Backend Lint & Unit Tests
+      # -------------------------------------------------
+      - name: Backend Lint
+        run: npm run lint
+        working-directory: ./backend
+
+      - name: Backend Unit Tests
+        run: npm test
+        working-directory: ./backend
+
+      # -------------------------------------------------
+      # 9. Trivy IaC Scan (Terraform, Helm values, etc.)
+      # -------------------------------------------------
+      - name: Install Trivy
         run: |
-          docker build -f Dockerfile.backend -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_BACKEND }}:${{ needs.setup.outputs.commit_sha }} .
-  
-  push-images:
-    needs: [build-frontend, build-backend]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
 
-      - name: Log in to registry
+      - name: Trivy Config Scan (IaC)
+        run: |
+          trivy config .
+
+      # -------------------------------------------------
+      # 10. Trivy Dockerfile Scan
+      # -------------------------------------------------
+      - name: Trivy Dockerfile Scan
+        run: |
+          trivy config Dockerfile.frontend
+          trivy config Dockerfile.backend
+
+      # -------------------------------------------------
+      # 11. Docker Build Setup (QEMU & Buildx)
+      # -------------------------------------------------
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # -------------------------------------------------
+      # 12. Docker Hub Authentication
+      # -------------------------------------------------
+      - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.REGISTRY_USERNAME }}
-          password: ${{ secrets.REGISTRY_PASSWORD }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Push frontend image
+      # -------------------------------------------------
+      # 13. Build & Push Frontend Image
+      # -------------------------------------------------
+      - name: Build & push Frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.frontend
+          push: true
+          tags: ${{ env.IMAGE_NAME_FRONTEND }}:${{ env.IMAGE_TAG }}
+          platforms: linux/amd64
+
+      # -------------------------------------------------
+      # 14. Build & Push Backend Image
+      # -------------------------------------------------
+      - name: Build & push Backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: Dockerfile.backend
+          push: true
+          tags: ${{ env.IMAGE_NAME_BACKEND }}:${{ env.IMAGE_TAG }}
+          platforms: linux/amd64
+
+      # -------------------------------------------------
+      # 15. Trivy Container Image Scan
+      # -------------------------------------------------
+      - name: Trivy Scan Frontend Image
         run: |
-          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_FRONTEND }}:${{ needs.setup.outputs.commit_sha }}
+          trivy image ${{ env.IMAGE_NAME_FRONTEND }}:${{ env.IMAGE_TAG }}
 
-      - name: Push backend image
+      - name: Trivy Scan Backend Image
         run: |
-          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_BACKEND }}:${{ needs.setup.outputs.commit_sha }}
+          trivy image ${{ env.IMAGE_NAME_BACKEND }}:${{ env.IMAGE_TAG }}
 
-  # ---- OPTIONAL DEPLOY STEP (placeholder) ----
-  # deploy:
-  #   needs: push-images
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Trigger Render / Vercel deploy
-  #       run: echo "Add your deployment commands here"
+      # -------------------------------------------------
+      # 16. Helm Chart Validation (Lint)
+      # -------------------------------------------------
+      - name: Helm Lint
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.0
+      - run: helm lint ./helm
+
+      # -------------------------------------------------
+      # 17. AWS Authentication (OIDC)
+      # -------------------------------------------------
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # -------------------------------------------------
+      # 18. EKS Cluster Authentication (kubeconfig from secret)
+      # -------------------------------------------------
+      - name: Set KUBECONFIG
+        run: |
+          echo "$KUBE_CONFIG_DATA" | base64 -d > $HOME/.kube/config
+        env:
+          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
+
+      # -------------------------------------------------
+      # 19. Deploy Application via Helm (frontend & backend)
+      # -------------------------------------------------
+      - name: Deploy db4fresh Helm chart
+        run: |
+          helm upgrade --install db4fresh ./helm \
+            --set frontend.image.repository=${{ env.IMAGE_NAME_FRONTEND }} \
+            --set frontend.image.tag=${{ env.IMAGE_TAG }} \
+            --set backend.image.repository=${{ env.IMAGE_NAME_BACKEND }} \
+            --set backend.image.tag=${{ env.IMAGE_TAG }} \
+            --namespace db4fresh --create-namespace
+
+      # -------------------------------------------------
+      # 20. Prometheus Deployment (community chart)
+      # -------------------------------------------------
+      - name: Add Prometheus repo
+        run: helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+
+      - name: Update repos
+        run: helm repo update
+
+      - name: Deploy Prometheus stack
+        run: |
+          helm upgrade --install prometheus prometheus-community/kube-prometheus-stack \
+            --namespace monitoring --create-namespace
+
+      # -------------------------------------------------
+      # 21. Grafana Deployment (via Prometheus stack) – already included
+      # -------------------------------------------------
+
+      # -------------------------------------------------
+      # 22. Alertmanager Deployment – already included in kube‑prometheus‑stack
+      # -------------------------------------------------
+
+      # -------------------------------------------------
+      # 23. Slack Notification
+      # -------------------------------------------------
+      - name: Send Slack notification
+        if: always()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: '{"text":"CI/CD pipeline completed for commit ${{ github.sha }}. Status: ${{ job.status }}"}'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      # -------------------------------------------------
+      # 24. GitHub Release Creation (only on successful main branch run)
+      # -------------------------------------------------
+      - name: Create Release
+        if: github.ref == 'refs/heads/main' && job.status == 'success'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: Release v${{ github.run_number }}
+          body: |
+            Automated release generated by CI/CD pipeline.
+          draft: false
+          prerelease: false

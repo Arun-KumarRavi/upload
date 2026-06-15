@@ -1,0 +1,95 @@
+global:
+  # Global image settings (default repositories can be overridden per component)
+  imagePullPolicy: IfNotPresent
+
+frontend:
+  replicaCount: 2
+  image:
+    repository: dockerhub-user/db4fresh-frontend
+    tag: latest
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+  service:
+    type: ClusterIP
+    port: 80
+  ingress:
+    enabled: true
+    className: "nginx"
+    host: "example.com"
+    path: "/"
+    tls: []
+  configMap: {}
+  extraEnv: []
+
+backend:
+  replicaCount: 2
+  image:
+    repository: dockerhub-user/db4fresh-backend
+    tag: latest
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+  service:
+    type: ClusterIP
+    port: 4000
+  configMap: {}
+  extraEnv: []
+  secrets: []
+
+serviceAccount:
+  create: false
+  name: ""
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations: {}
+  hosts:
+    - host: "example.com"
+      paths:
+        - path: "/"
+          pathType: ImplementationSpecific
+        - path: "/api"
+          pathType: ImplementationSpecific
+  tls: []
+
+albAnnotations: {}
+
+hpa:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+pdb:
+  enabled: true
+  minAvailable: 1
+
+networkPolicy:
+  enabled: false
+  # Example allow traffic only from same namespace and from frontend to backend
+  ingress:
+    - from:
+        - podSelector: {}
+  egress: []
+
+serviceMonitor:
+  enabled: false
+  labels: {}
+  interval: "30s"
+  honorLabels: true
