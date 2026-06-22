@@ -1,15 +1,86 @@
-# ---------- Build ----------
-FROM node:18-alpine AS builder
-WORKDIR /app
-COPY backend/package*.json ./
-RUN apk add --no-cache make g++ python3
-RUN npm ci --production
-COPY backend ./
+# ============================================================================
+# Backend Dockerfile - Db4Fresh Node.js Express API
+# ============================================================================
+# Multi-stage build for optimized production image
+# Stage 1: Dependencies
+# Stage 2: Runtime
+# ============================================================================
 
-# ---------- Runtime ----------
-FROM node:18-alpine
+# ---- Stage 1: Dependencies Builder ----
+FROM node:18-alpine AS dependencies
+
+# Metadata
+LABEL maintainer="Arun Kumar Ravi <arunkumarravi08@gmail.com>"
+LABEL description="Dependencies stage for Db4Fresh backend"
+
+# Set working directory
 WORKDIR /app
-COPY --from=builder /app .
+
+# Copy package files only (for layer caching)
+COPY backend/package*.json ./
+COPY backend/.npmrc* ./
+
+# Install build dependencies
+RUN apk add --no-cache \
+    python3 \
+    make \
+    g++ \
+    && npm ci --prefer-offline --no-audit \
+    && npm cache clean --force
+
+# ---- Stage 2: Runtime ----
+FROM node:18-alpine
+
+# Metadata
+LABEL maintainer="Arun Kumar Ravi <arunkumarravi08@gmail.com>"
+LABEL description="Db4Fresh backend API - Production"
+LABEL version="1.0.0"
+
+# Set environment
+ENV NODE_ENV=production \
+    NODE_OPTIONS="--max-old-space-size=512"
+
+# Install runtime dependencies only
+RUN apk update \
+    && apk add --no-cache \
+    curl \
+    dumb-init \
+    tini \
+    && rm -rf /var/cache/apk/*
+
+# Create non-root user for security
+RUN addgroup -g 1000 -S appuser && adduser -S -D -H -u 1000 -h /app -s /sbin/nologin -G appuser -g appuser appuser
+
+# Set working directory
+WORKDIR /app
+
+# Copy node_modules from dependencies stage
+COPY --from=dependencies /app/node_modules ./node_modules
+
+# Copy application code from context
+COPY backend/ .
+
+# Create necessary directories with proper permissions
+RUN mkdir -p uploads logs tmp \
+    && chown -R appuser:appuser /app \
+    && chmod -R 755 /app \
+    && chmod -R 755 uploads logs tmp
+
+# Security: Remove unnecessary files
+RUN rm -rf .git .github .gitignore .env.example README.md
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD curl -f http://localhost:4000 || exit 1
+
+# Expose port
 EXPOSE 4000
-ENV NODE_ENV=production
+
+# Run as non-root user
+USER appuser
+
+# Use tini/dumb-init to handle signals properly
+ENTRYPOINT ["/sbin/tini", "--"]
+
+# Start application
 CMD ["node", "server.js"]

@@ -1,0 +1,65 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Dependencies
+node_modules
+npm-debug.log
+yarn-error.log
+.pnpm-debug.log
+package-lock.json.bak
+
+# Environment
+.env
+.env.local
+.env.*.local
+.env.production.local
+.env.development.local
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Builds
+dist
+build
+out
+.next
+.nuxt
+.cache
+.parcel-cache
+.vercel
+.output
+
+# Testing
+.mocha
+.nyc_output
+coverage
+.jest
+
+# Documentation
+README.md
+CHANGELOG.md
+CONTRIBUTING.md
+
+# CI/CD
+.github
+.gitlab-ci.yml
+.travis.yml
+.circleci
+
+# Other
+.eslintignore
+.prettierignore
+.editorconfig
+Jakefile
+Makefile
+Gemfile
+.rubocop.yml
+.babelrc
+.browserlistrc
