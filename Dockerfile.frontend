@@ -1,16 +1,95 @@
-# ---------- Build ----------
-FROM node:18-alpine AS builder
-WORKDIR /app
-COPY package*.json ./
-# Install build tools for native modules
-RUN apk add --no-cache python3 make g++ \
-    && npm ci
-COPY . .
-# Build the Vite app
-RUN npm run build   # produces ./dist
+# ============================================================================
+# Frontend Dockerfile - Db4Fresh React App
+# ============================================================================
+# Multi-stage build for optimized production image
+# Stage 1: Build
+# Stage 2: Runtime with Nginx
+# ============================================================================
 
-# ---------- Runtime ----------
-FROM nginx:stable-alpine
+# ---- Stage 1: Builder ----
+FROM node:18-alpine AS builder
+
+# Metadata
+LABEL maintainer="Arun Kumar Ravi <arunkumarravi08@gmail.com>"
+LABEL description="Builder stage for Db4Fresh frontend"
+
+# Set working directory
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+COPY .npmrc* ./
+
+# Install dependencies with clean install (reproducible builds)
+RUN apk add --no-cache \
+    python3 \
+    make \
+    g++ \
+    && npm ci --prefer-offline --no-audit \
+    && npm cache clean --force
+
+# Copy source code
+COPY . .
+
+# Build the Vite app
+RUN npm run build
+
+# Verify build output
+RUN test -d dist || (echo "Build failed: dist directory not found" && exit 1)
+
+# ---- Stage 2: Runtime with Nginx ----
+FROM nginx:1.25-alpine
+
+# Metadata
+LABEL maintainer="Arun Kumar Ravi <arunkumarravi08@gmail.com>"
+LABEL description="Db4Fresh frontend - Production"
+LABEL version="1.0.0"
+
+# Install additional packages and security updates
+RUN apk update \
+    && apk add --no-cache \
+    curl \
+    dumb-init \
+    && rm -rf /var/cache/apk/*
+
+# Create non-root user for security
+RUN addgroup -g 101 -S nginx && adduser -S -D -H -u 101 -h /var/cache/nginx -s /sbin/nologin -G nginx -g nginx nginx || true
+
+# Copy built application from builder stage
 COPY --from=builder /app/dist /usr/share/nginx/html
+
+# Copy custom nginx configuration
+COPY nginx.conf /etc/nginx/nginx.conf
+COPY default.conf /etc/nginx/conf.d/default.conf
+
+# Set proper permissions
+RUN chown -R nginx:nginx /usr/share/nginx/html \
+    && chmod -R 755 /usr/share/nginx/html \
+    && chown -R nginx:nginx /var/cache/nginx \
+    && chown -R nginx:nginx /var/log/nginx \
+    && touch /var/run/nginx.pid \
+    && chown -R nginx:nginx /var/run/nginx.pid
+
+# Create cache directories
+RUN mkdir -p /var/cache/nginx/client_temp \
+    && chown -R nginx:nginx /var/cache/nginx
+
+# Security: Remove unnecessary files
+RUN rm -rf /etc/nginx/conf.d/*.bak \
+    && rm -rf /etc/nginx/sites-*
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost/health || exit 1
+
+# Expose port
 EXPOSE 80
+
+# Run as non-root user
+USER nginx
+
+# Use dumb-init to handle signals properly
+ENTRYPOINT ["/usr/sbin/dumb-init", "--"]
+
+# Start nginx in foreground
 CMD ["nginx", "-g", "daemon off;"]
